@@ -9,6 +9,7 @@
 #include <tuple>
 #include <utility>
 #include <boost/format.hpp>
+#include <random>
 
 using namespace amytest;
 
@@ -32,7 +33,9 @@ namespace notstd {
     {
         using base_tuple = std::decay_t<Tuple>;
         constexpr auto tuple_size = std::tuple_size<base_tuple>::value;
-        detail::for_each(std::forward<Tuple>(tuple), std::forward<F>(f), std::make_index_sequence<tuple_size>());
+        detail::for_each(std::forward<Tuple>(tuple),
+                         std::forward<F>(f),
+                         std::make_index_sequence<tuple_size>());
     };
 }
 
@@ -47,10 +50,19 @@ struct sql_escaper
         output_.resize(slen * 2 + 1 + 2);
         output_[0] = '\'';
 
-        auto length = mysql_real_escape_string_quote(connector.native(), &output_[1], arg.data(), slen, '\'');
+        auto length = mysql_real_escape_string_quote(connector.native(),
+                                                     &output_[1],
+                                                     arg.data(), slen,
+                                                     '\'');
         output_[1 + length] = '\'';
         output_.erase(length + 2);
 
+        return output_;
+    }
+
+    std::string const& operator ()(int x)
+    {
+        output_ = std::to_string(x);
         return output_;
     }
 
@@ -89,7 +101,7 @@ struct perform_test
         connector_.async_connect(endpoint,
                                  auth_info,
                                  "test",
-                                 amy::client_multi_statements | amy::client_multi_results,
+                                 amy::client_multi_statements | amy::client_multi_results | amy::client_ssl,
                                  [this](auto&& ...args)
                                  {
                                      this->handle_connect(std::forward<decltype(args)>(args)...);
@@ -103,23 +115,32 @@ private:
             std::cout << __func__ << " : " << connector_.error_message(error) << std::endl;
         }
         else {
+            connector_.autocommit(false);
+            std::random_device              rnd;
+            std::default_random_engine      eng(rnd());
+            std::uniform_int_distribution<> dist(1, 99);
+            int                             age = dist(eng);
+
             auto query = build_query(connector_,
-                                     "insert into people (`name`) values (%1%)"
-                                         " ; "
-                                         "select count(*) from people where `name` = %1%"
-                                         " ; "
-                                         "select * from people",
-                                     "richard");
+                                     R"__(
+START TRANSACTION ;
+insert into people (`name`, `age`) values (%1%, %2%);
+select count(*) from people where `name` = %1%;
+select * from people where age > %3%;
+COMMIT;
+select * from people)__",
+                                     "richard",
+                                     age, age / 2);
             std::cout << "query: " << query << std::endl;
             connector_.async_query(query,
                                    [this](auto&& ...args)
                                    {
-                                       this->handle_insert(std::forward<decltype(args)>(args)...);
+                                       this->handle_query(std::forward<decltype(args)>(args)...);
                                    });
         }
     }
 
-    void handle_insert(boost::system::error_code const& ec)
+    void handle_query(boost::system::error_code const& ec)
     {
         if (ec) {
             std::cout << __func__ << " : " << ec.message() << std::endl;
@@ -138,21 +159,21 @@ private:
                              amy::result_set rs)
     {
         if (ec) {
-            std::cout << __func__ << " : " << ec.message() << std::endl;
+            std::cout << __func__ << " : " << connector_.error_message(ec) << std::endl;
         }
         else {
             std::cout << "result set: " << rs.affected_rows() << " affected rows:\n";
             for (auto&& r : rs) {
                 const char *sep = "";
-                for (auto  && f : r) {
+                for (auto&& f : r) {
                     std::cout << sep << f.as<std::string>();
                     sep = ", ";
                 }
                 std::cout << std::endl;
             }
-            if (connector_.has_more_results()) {
-                handle_insert(boost::system::error_code());
-            }
+        }
+        if (connector_.has_more_results()) {
+            handle_query(boost::system::error_code());
         }
 
     }
