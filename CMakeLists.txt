@@ -13,19 +13,24 @@ project(AmyTest)
 
 set (boostComponents system)
 hunter_add_package(Boost COMPONENTS ${boostComponents})
-
 find_package(Threads)
 find_package(Boost COMPONENTS ${boostComponents} REQUIRED)
 
 hunter_add_package(MySQL-client)
 find_package(MySQL-client REQUIRED)
 
+hunter_add_package(Protobuf)
+find_package(Protobuf REQUIRED)
+
 include_directories(SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/amy/include")
+
+add_subdirectory(proto)
 
 
 set(SOURCE_FILES src/main.cpp src/config.hpp)
 
 add_executable(amy-test ${SOURCE_FILES})
-target_link_libraries(amy-test ${MYSQL-CLIENT_LIBRARY} ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
-target_include_directories(amy-test SYSTEM PRIVATE ${MYSQL-CLIENT_ROOT} ${Boost_INCLUDE_DIRS})
+target_link_libraries(amy-test proto ${MYSQL-CLIENT_LIBRARY} ${Boost_LIBRARIES} ${Protobuf_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+target_include_directories(amy-test SYSTEM PRIVATE ${MYSQL-CLIENT_ROOT} ${Boost_INCLUDE_DIRS} ${Protobuf_INCLUDE_DIRS})
+target_include_directories(amy-test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_compile_definitions(amy-test PUBLIC USE_BOOST_ASIO=1)

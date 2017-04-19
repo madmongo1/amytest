@@ -1,0 +1,20 @@
+syntax="proto3";
+
+package test;
+
+message BigMessage
+{
+    message LittleMessage {
+        string a = 1;
+        int32 b = 2;
+        repeated string c = 3;
+
+    }
+
+    oneof decision
+    {
+        string x = 4;
+        LittleMessage y = 5;
+
+    }
+}
