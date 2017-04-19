@@ -19,9 +19,9 @@ namespace notstd {
         void for_each(Tuple&& tuple, F&& f, std::index_sequence<Is...>)
         {
             using expand = int[];
-            void(expand {
-                    0,
-                    (f(std::get<Is>(std::forward<Tuple>(tuple))), 0)...
+            void(expand{
+                0,
+                (f(std::get<Is>(std::forward<Tuple>(tuple))), 0)...
             });
         };
 
@@ -39,10 +39,10 @@ namespace notstd {
 struct sql_escaper
 {
     sql_escaper(amy::connector& connector)
-            : connector(connector)
-    {}
+        : connector(connector) {}
 
-    std::string const& operator()(std::string arg) {
+    std::string const& operator ()(std::string arg)
+    {
         auto slen = arg.length();
         output_.resize(slen * 2 + 1 + 2);
         output_[0] = '\'';
@@ -56,18 +56,19 @@ struct sql_escaper
 
     amy::connector& connector;
     std::vector<char> buffer_;
-    std::string output_;
+    std::string       output_;
 };
 
 
 template<class...Ts>
-auto build_query(amy::connector& connector, std::string const& format, Ts&&...parts)
+auto build_query(amy::connector& connector, std::string const& format, Ts&& ...parts)
 {
     auto escaper = sql_escaper(connector);
-    auto fmt = boost::format(format);
+    auto fmt     = boost::format(format);
 
     std::string result;
-    notstd::for_each(std::forward_as_tuple(std::forward<Ts>(parts)...), [&escaper, &fmt](auto&& part) {
+    notstd::for_each(std::forward_as_tuple(std::forward<Ts>(parts)...), [&escaper, &fmt](auto&& part)
+    {
         fmt % escaper(std::forward<decltype(part)>(part));
     });
     return fmt.str();
@@ -79,7 +80,7 @@ struct perform_test
     using endpoint_type = asio::ip::tcp::endpoint;
 
     perform_test(asio::io_service& owner)
-    : connector_(owner)
+        : connector_(owner)
     {
     }
 
@@ -88,8 +89,9 @@ struct perform_test
         connector_.async_connect(endpoint,
                                  auth_info,
                                  "test",
-                                 amy::client_multi_statements |  amy::client_multi_results,
-                                 [this](auto&&...args) {
+                                 amy::client_multi_statements | amy::client_multi_results,
+                                 [this](auto&& ...args)
+                                 {
                                      this->handle_connect(std::forward<decltype(args)>(args)...);
                                  });
     }
@@ -98,17 +100,20 @@ private:
     void handle_connect(boost::system::error_code const& error)
     {
         if (error) {
-            std::cout << __func__ << " : " << error.message() << std::endl;
+            std::cout << __func__ << " : " << connector_.error_message(error) << std::endl;
         }
         else {
             auto query = build_query(connector_,
                                      "insert into people (`name`) values (%1%)"
-                    " ; "
-                    "select count(*) from people where `name` = %1%",
+                                         " ; "
+                                         "select count(*) from people where `name` = %1%"
+                                         " ; "
+                                         "select * from people",
                                      "richard");
             std::cout << "query: " << query << std::endl;
             connector_.async_query(query,
-                                   [this](auto&&...args) {
+                                   [this](auto&& ...args)
+                                   {
                                        this->handle_insert(std::forward<decltype(args)>(args)...);
                                    });
         }
@@ -121,9 +126,10 @@ private:
         }
         else {
             std::cout << "affected rows: " << connector_.affected_rows() << std::endl;
-            connector_.async_store_result([this](auto&&...args) {
-                this->handle_store_result(std::forward<decltype(args)>(args)...);
-            });
+            connector_.async_store_result([this](auto&& ...args)
+                                          {
+                                              this->handle_store_result(std::forward<decltype(args)>(args)...);
+                                          });
         }
 
     }
@@ -136,10 +142,9 @@ private:
         }
         else {
             std::cout << "result set: " << rs.affected_rows() << " affected rows:\n";
-            for (auto&& r : rs)
-            {
-                const char* sep = "";
-                for (auto&& f : r) {
+            for (auto&& r : rs) {
+                const char *sep = "";
+                for (auto  && f : r) {
                     std::cout << sep << f.as<std::string>();
                     sep = ", ";
                 }
@@ -152,8 +157,8 @@ private:
 
     }
 
-    endpoint_type endpoint{address::from_string("127.0.0.1"), 3306};
-    amy::auth_info auth_info { "test-user", "test-password" };
+    endpoint_type  endpoint{address::from_string("127.0.0.1"), 3306};
+    amy::auth_info auth_info{"test-user", "test-password"};
     amy::connector connector_;
 };
 
@@ -161,7 +166,7 @@ int main()
 {
     asio::io_service ios;
 
-    perform_test tester {ios};
+    perform_test tester{ios};
     tester.start();
     ios.run();
 

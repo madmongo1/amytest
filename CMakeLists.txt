@@ -21,7 +21,7 @@ find_package(MySQL-client REQUIRED)
 include_directories(SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/amy/include")
 
 
-set(SOURCE_FILES src/main.cpp)
+set(SOURCE_FILES src/main.cpp src/config.hpp)
 
 add_executable(amy-test ${SOURCE_FILES})
 target_link_libraries(amy-test ${MYSQL-CLIENT_LIBRARY} ${Boost_LIBRARIES})
