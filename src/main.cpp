@@ -5,14 +5,21 @@
 #include "config.hpp"
 
 #include <amy.hpp>
+#include <mysql/mysql.h>
+
 #include <iostream>
+#include <iomanip>
 #include <tuple>
 #include <utility>
 #include <boost/format.hpp>
 #include <random>
 #include <google/protobuf/message.h>
+#include <google/protobuf/util/type_resolver_util.h>
+#include <google/protobuf/util/json_util.h>
 
 #include "proto/test.pb.h"
+
+#include "base64.hpp"
 
 using namespace amytest;
 
@@ -42,12 +49,14 @@ namespace notstd {
     };
 }
 
-struct db_name : std::string
+struct db_name
+    : std::string
 {
     using std::string::string;
 };
 
-struct verbatim : std::string
+struct verbatim
+    : std::string
 {
     using std::string::string;
 };
@@ -59,7 +68,7 @@ struct sql_escaper
 
 
     template<std::size_t N>
-    std::string const& operator()(const char (&arg) [N])
+    std::string const& operator ()(const char (& arg)[N])
     {
         auto slen = N - 1;
         output_.resize(slen * 2 + 1 + 2);
@@ -91,7 +100,7 @@ struct sql_escaper
         return output_;
     }
 
-    std::string const& operator()(db_name const& arg)
+    std::string const& operator ()(db_name const& arg)
     {
         auto slen = arg.length();
         output_.resize(slen * 2 + 1 + 2);
@@ -107,7 +116,7 @@ struct sql_escaper
         return output_;
     }
 
-    std::string const& operator()(verbatim const& arg)
+    std::string const& operator ()(verbatim const& arg)
     {
         return arg;
     }
@@ -143,7 +152,6 @@ auto build_query(amy::connector& connector, std::string const& format, Ts&& ...p
 {
     return format_query(connector, format, std::forward<Ts>(parts)...).str();
 }
-
 
 
 struct perform_test
@@ -246,7 +254,7 @@ select * from people)__",
 struct query_doer
 {
     query_doer(amy::connector& con)
-            : con(con)
+        : con(con)
     {
         con.query("SELECT DATABASE()");
         auto rs = con.store_result();
@@ -255,14 +263,16 @@ struct query_doer
     }
 
     template<class...Ts>
-    auto operator()(const std::string& sql, Ts&&...ts) const {
+    auto operator ()(const std::string& sql, Ts&& ...ts) const
+    {
         auto query = build_query(con, sql, std::forward<Ts>(ts)...);
         std::cout << "executing:\n" << query << std::endl;
         con.query(query);
         return con.store_result();
     }
 
-    bool add_missing_column(std::string const& table_name, std::string const& column_name, std::string const& column_def) const
+    bool add_missing_column(std::string const& table_name, std::string const& column_name,
+                            std::string const& column_def) const
     {
         auto rs = self()(R"__(SELECT COUNT(*)
 FROM `information_schema`.`COLUMNS`
@@ -272,7 +282,7 @@ AND `TABLE_NAME` = %2%
 AND `COLUMN_NAME` = %3%)__", schema, table_name, column_name);
         if (rs.at(0).at(0).as<int>() == 0) {
             self()(R"__(ALTER TABLE %1% ADD %2% %3%)__",
-                db_name(table_name), db_name(column_name), verbatim(column_def));
+                   db_name(table_name), db_name(column_name), verbatim(column_def));
             return true;
         }
         else {
@@ -281,6 +291,7 @@ AND `COLUMN_NAME` = %3%)__", schema, table_name, column_name);
     }
 
     const query_doer& self() const { return *this; }
+
     query_doer& self() { return *this; }
 
     amy::connector& con;
@@ -288,7 +299,7 @@ AND `COLUMN_NAME` = %3%)__", schema, table_name, column_name);
 };
 
 
-void build_scheme(query_doer& con, google::protobuf::Descriptor const * descriptor)
+void build_scheme(query_doer& con, google::protobuf::Descriptor const *descriptor)
 {
     using namespace ::google::protobuf;
     con(R"__(CREATE TABLE IF NOT EXISTS %1% (
@@ -298,25 +309,26 @@ __owner_id__ INT NULL
 );
 )__", db_name(descriptor->full_name()));
 
-    auto nfields = descriptor->field_count();
-    for (decltype(nfields) ifield = 0 ; ifield < nfields ; ++ifield)
-    {
+    auto                   nfields = descriptor->field_count();
+    for (decltype(nfields) ifield  = 0; ifield < nfields; ++ifield) {
         auto field = descriptor->field(ifield);
         std::cout << field->full_name();
         std::cout << " type: " << field->type() << " - " << field->type_name();
         std::cout << std::endl;
-        if (field->is_repeated())
-        {
+        if (field->is_repeated()) {
 
-        } else {
+        }
+        else {
             switch (field->type()) {
                 case FieldDescriptor::TYPE_STRING: {
                     con.add_missing_column(descriptor->full_name(), field->name(), "VARCHAR(255) NULL");
-                } break;
+                }
+                    break;
 
                 case FieldDescriptor::TYPE_INT32: {
                     con.add_missing_column(descriptor->full_name(), field->name(), "INT(9) NULL");
-                } break;
+                }
+                    break;
 
                 case FieldDescriptor::TYPE_MESSAGE:
                     build_scheme(con, field->message_type());
@@ -329,26 +341,135 @@ __owner_id__ INT NULL
 
 }
 
-void build_scheme(amy::connector& con, const google::protobuf::Descriptor * descriptor)
+void build_scheme(amy::connector& con, const google::protobuf::Descriptor *descriptor)
 {
-    query_doer doer(con);
-    build_scheme(doer, descriptor);
+    query_doer helper(con);
+    build_scheme(helper, descriptor);
+}
+
+void make_blob_store(amy::connector& connection)
+{
+    query_doer helper(connection);
+    execute(connection, R"__(
+CREATE TABLE IF NOT EXISTS `tbl_message_store` (
+  `unique_id` int(11) NOT NULL AUTO_INCREMENT,
+  `message_type` varchar(255) NOT NULL,
+  `binary_data` longblob,
+  `json_data` longtext,
+  PRIMARY KEY (`unique_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+)__");
+}
+
+std::string to_base64(std::string in)
+{
+    auto        b    = base64();
+    int         len  = b.needed_encoded_length(in.size());
+    std::string result(len, ' ');
+    auto        len2 = b.encode(in.c_str(), in.size(), &result[0]);
+    result.erase(std::strlen(result.c_str()));
+    return result;
+}
+
+std::string to_json(google::protobuf::Message const& message)
+{
+    using namespace google::protobuf;
+
+    auto result = std::string();
+    auto status = util::MessageToJsonString(message, &result);
+    if (not status.ok()) {
+        throw std::runtime_error("failed to convert to json: " + status.ToString());
+    }
+    return result;
+
+}
+
+int write_message(amy::connector& conn, ::google::protobuf::Message const& message, bool as_json = false)
+{
+    auto query = std::string();
+    if (as_json) {
+        query = build_query(conn, "INSERT INTO tbl_message_store (message_type, json_data) VALUES(%1%, %2%)",
+                            message.GetDescriptor()->full_name(),
+                            to_json(message));
+
+    }
+    else {
+        query = build_query(conn,
+                            "INSERT INTO tbl_message_store (message_type, binary_data) VALUES(%1%, FROM_BASE64(%2%))",
+                            message.GetDescriptor()->full_name(),
+                            to_base64(message.SerializeAsString()));
+    }
+    std::cout << "executing: " << query << std::endl;
+    auto affected = execute(conn, query);
+    if (not(affected == 1)) {
+        throw std::runtime_error("failed to insert");
+    }
+
+    execute(conn, "SELECT LAST_INSERT_ID()");
+    auto id = conn.store_result()[0][0].as<int>();
+    return id;
+}
+
+void read_message(amy::connector& conn, ::google::protobuf::Message& message, int id)
+{
+    auto query = build_query(conn,
+                             "SELECT"
+                                 " message_type, binary_data, json_data"
+                                 " FROM tbl_message_store"
+                                 " WHERE unique_id = %1%", id);
+    std::cout << "executing: " << query << std::endl;
+    execute(conn, query);
+    auto rs = conn.store_result();
+    auto&& row = rs.at(0);
+    auto message_type = row.at(0).as<std::string>();
+    if (message_type != message.GetDescriptor()->full_name())
+        throw std::runtime_error("message type mismatch: " + message_type);
+    if (not row.at(1).is_null()) {
+        auto blobdata = row.at(1).as<std::string>();
+        message.ParseFromString(blobdata);
+    }
+    else if (not row.at(2).is_null()) {
+        auto json = row.at(2).as<std::string>();
+        ::google::protobuf::util::JsonStringToMessage(json, &message);
+    }
+    else {
+        throw std::runtime_error("invalid record");
+    }
 }
 
 int main()
 {
-    auto addr = tcp_endpoint(ip_address::from_string("127.0.0.1"), 3306);
+    auto addr      = tcp_endpoint(ip_address::from_string("127.0.0.1"), 3306);
     auto auth_info = amy::auth_info{"test-user", "test-password"};
 
     asio::io_service ios;
-    amy::connector connection(ios);
+    amy::connector   connection(ios);
     connection.connect(addr, auth_info, "test", amy::client_multi_statements | amy::client_multi_results);
 
     try {
+        make_blob_store(connection);
+        auto do_it = [&](auto use_json)
+        {
+            test::BigMessage source;
+            source.mutable_y()->mutable_a()->assign("value for a");
+            source.mutable_y()->add_c("foo");
+            for (int         i  = 0; i < 10; ++i)
+                source.mutable_y()->add_c("bar " + std::to_string(i));
+            auto             id = write_message(connection, source, use_json);
+            test::BigMessage dest;
+            read_message(connection, dest, id);
+            std::cout << source.ShortDebugString() << std::endl;
+            std::cout << dest.ShortDebugString() << std::endl;
+
+            std::cout << std::boolalpha << "same? " << (source.ShortDebugString() == dest.ShortDebugString())
+                      << std::endl;
+        };
+        do_it(true);
+        do_it(false);
+
         build_scheme(connection, test::BigMessage::descriptor());
     }
-    catch(AMY_SYSTEM_NS::system_error const& se)
-    {
+    catch (AMY_SYSTEM_NS::system_error const& se) {
         auto&& category = se.code().category();
         if (category == amy::error::get_client_category()) {
             std::cerr << connection.error_message(se.code());
