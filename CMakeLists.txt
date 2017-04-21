@@ -22,6 +22,9 @@ find_package(MySQL-client REQUIRED)
 hunter_add_package(Protobuf)
 find_package(Protobuf REQUIRED)
 
+hunter_add_package(libsodium)
+find_package(libsodium REQUIRED)
+
 include_directories(SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/amy/include")
 
 add_subdirectory(proto)
@@ -30,7 +33,7 @@ add_subdirectory(proto)
 set(SOURCE_FILES src/main.cpp src/config.hpp src/base64.cpp src/base64.hpp)
 
 add_executable(amy-test ${SOURCE_FILES})
-target_link_libraries(amy-test proto ${MYSQL-CLIENT_LIBRARY} ${Boost_LIBRARIES} ${Protobuf_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(amy-test proto libsodium::libsodium ${MYSQL-CLIENT_LIBRARY} ${Boost_LIBRARIES} ${Protobuf_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
 target_include_directories(amy-test SYSTEM PRIVATE ${MYSQL-CLIENT_ROOT} ${Boost_INCLUDE_DIRS} ${Protobuf_INCLUDE_DIRS})
 target_include_directories(amy-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(amy-test PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/src)

@@ -1,0 +1,13 @@
+syntax = "proto2";
+import "google/protobuf/descriptor.proto";
+
+package limits;
+
+extend google.protobuf.FieldOptions
+{
+    /// Allow people to set options indicating the max length of a field
+    /// @note for strings: Setting length to 0 indicates a LONGTEXT, setting the length to less
+    /// than 255 indicates a varchar(n)
+    optional uint64 maxLength = 51000;
+
+}

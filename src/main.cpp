@@ -16,6 +16,7 @@
 #include <google/protobuf/message.h>
 #include <google/protobuf/util/type_resolver_util.h>
 #include <google/protobuf/util/json_util.h>
+#include <sodium/crypto_generichash.h>
 
 #include "proto/test.pb.h"
 
@@ -132,7 +133,6 @@ struct sql_escaper
     std::string       output_;
 };
 
-
 template<class...Ts>
 auto format_query(amy::connector& connector, std::string const& format, Ts&& ...parts)
 {
@@ -152,6 +152,105 @@ auto build_query(amy::connector& connector, std::string const& format, Ts&& ...p
 {
     return format_query(connector, format, std::forward<Ts>(parts)...).str();
 }
+
+std::string hex_encode(std::uint8_t * first, std::uint8_t* last)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    std::string result;
+    auto dist = std::distance(first, last);
+    result.reserve(dist * 2);
+    while (first != last)
+    {
+        auto byte = *first++;
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 0xf]);
+    }
+    return result;
+}
+
+
+struct table_lookup
+{
+    table_lookup(amy::connector& conn) : connection_(conn) {}
+
+    void init()
+    {
+        static const char query[] = ""
+                "CREATE TABLE IF NOT EXISTS tbl_table_name"
+                "("
+                "   real_name VARCHAR(1024) NOT NULL PRIMARY KEY,"
+                "   hash_name CHAR(64) NOT NULL,"
+                "   hash_algorithm VARCHAR(255) NOT NULL,"
+                "   UNIQUE INDEX (hash_name, hash_algorithm)"
+                ")";
+        execute(connection_, query);
+    }
+
+    std::string lookup(std::string const& real_name)
+    {
+        auto ifind = my_real_to_hash_.find(real_name);
+        if (ifind != my_real_to_hash_.end())
+            return ifind->second;
+
+        auto& our_cache = get_static_cache();
+        auto hash_name =  our_cache.lookup(connection_, real_name);
+        my_real_to_hash_[real_name] = hash_name;
+        my_hash_to_real_[hash_name] = real_name;
+        return hash_name;
+    }
+
+    struct cache
+    {
+        std::string lookup(amy::connector& conn, std::string const& real_name)
+        {
+            auto lock = std::unique_lock<std::mutex>(mutex_);
+            auto ifind = real_to_hash_.find(real_name);
+            if (ifind != real_to_hash_.end())
+                return ifind->second;
+            conn.query(build_query(conn, "select hash_name from tbl_table_name where real_name=%1%;", real_name));
+            auto rs = conn.store_result();
+            if (rs.size() == 0)
+            {
+                std::uint8_t hash[32];
+                crypto_generichash(hash, 32, reinterpret_cast<const unsigned char*>(real_name.c_str()), real_name.length(), nullptr, 0);
+                auto hash_name = hex_encode(hash, hash + 32);
+                update(real_name, hash_name);
+                execute(conn, build_query(conn,
+                        "insert into tbl_table_name (real_name, hash_name, hash_algorithm)"
+                " values (%1%, %2%, %3%)",
+                        real_name, hash_name, "crypto_generichash(32,no_key)"));
+                return hash_name;
+
+            } else {
+                auto hash_name = rs.at(0).at(0).as<std::string>();
+                update(real_name, hash_name);
+                return hash_name;
+            }
+        }
+
+
+        void update(std::string const& real_name, std::string const& hashed_name)
+        {
+            real_to_hash_[real_name] = db_name(hashed_name);
+            hash_to_real_[hashed_name] = real_name;
+        }
+
+        std::unordered_map<std::string, std::string> real_to_hash_;
+        std::unordered_map<std::string, std::string> hash_to_real_;
+        std::mutex mutex_;
+    };
+
+    static cache& get_static_cache() {
+        static cache cache_ {};
+        return cache_;
+    }
+
+    amy::connector& connection_;
+    std::unordered_map<std::string, std::string> my_real_to_hash_;
+    std::unordered_map<std::string, std::string> my_hash_to_real_;
+};
+
+
 
 
 struct perform_test
@@ -290,26 +389,57 @@ AND `COLUMN_NAME` = %3%)__", schema, table_name, column_name);
         }
     }
 
+    std::string enquote(const std::string& str)
+    {
+        return escaper(str);
+    }
+
     const query_doer& self() const { return *this; }
 
     query_doer& self() { return *this; }
 
     amy::connector& con;
+    sql_escaper escaper { con };
     std::string schema;
+    table_lookup tbl_lookup { con };
 };
+
+std::string deduce_string_storage(std::int64_t max_length)
+{
+    if (max_length == 0)
+    {
+        return "LONGTEXT";
+    }
+    else if (max_length < 256)
+    {
+        return "VARCHAR(" + std::to_string(max_length) + ")";
+    }
+    else if (max_length < 65536) {
+        return "TEXT";
+    }
+    else {
+        return "LONGTEXT";
+    }
+}
 
 
 void build_scheme(query_doer& con, google::protobuf::Descriptor const *descriptor)
 {
     using namespace ::google::protobuf;
+
+    auto table_hash_name = con.tbl_lookup.lookup(descriptor->full_name());
+
+
+
     con(R"__(CREATE TABLE IF NOT EXISTS %1% (
 __id__ INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 __owner_type__ VARCHAR(64) NULL,
 __owner_id__ INT NULL
 );
-)__", db_name(descriptor->full_name()));
+)__", db_name(table_hash_name));
 
     auto                   nfields = descriptor->field_count();
+
     for (decltype(nfields) ifield  = 0; ifield < nfields; ++ifield) {
         auto field = descriptor->field(ifield);
         std::cout << field->full_name();
@@ -321,12 +451,21 @@ __owner_id__ INT NULL
         else {
             switch (field->type()) {
                 case FieldDescriptor::TYPE_STRING: {
-                    con.add_missing_column(descriptor->full_name(), field->name(), "VARCHAR(255) NULL");
+                    auto maxLength = field->options().GetExtension(limits::maxLength);
+                    auto storage_def = deduce_string_storage(maxLength);
+                    if (auto oneof = field->containing_oneof()) {
+                        storage_def += " NULL";
+                    }
+                    else {
+                        storage_def += " NOT NULL DEFAULT " + con.enquote(field->default_value_string());
+                    }
+
+                    con.add_missing_column(table_hash_name, field->name(), storage_def);
                 }
                     break;
 
                 case FieldDescriptor::TYPE_INT32: {
-                    con.add_missing_column(descriptor->full_name(), field->name(), "INT(9) NULL");
+                    con.add_missing_column(table_hash_name, field->name(), "INT(9) NULL");
                 }
                     break;
 
@@ -447,14 +586,20 @@ int main()
     connection.connect(addr, auth_info, "test", amy::client_multi_statements | amy::client_multi_results);
 
     try {
+        auto lookup = table_lookup(connection);
+        lookup.init();
+
         make_blob_store(connection);
         auto do_it = [&](auto use_json)
         {
             test::BigMessage source;
             source.mutable_y()->mutable_a()->assign("value for a");
             source.mutable_y()->add_c("foo");
-            for (int         i  = 0; i < 10; ++i)
+
+            for (int i  = 0; i < 10; ++i)
+            {
                 source.mutable_y()->add_c("bar " + std::to_string(i));
+            }
             auto             id = write_message(connection, source, use_json);
             test::BigMessage dest;
             read_message(connection, dest, id);

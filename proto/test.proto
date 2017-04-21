@@ -1,12 +1,14 @@
 syntax="proto3";
 
+import "limits.proto";
+
 package test;
 
 message BigMessage
 {
     message LittleMessage {
-        string a = 1;
-        int32 b = 2;
+        string a = 1 [(limits.maxLength) = 128];
+        int32 b = 2 ;
         repeated string c = 3;
 
     }
