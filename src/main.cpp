@@ -19,239 +19,15 @@
 #include <sodium/crypto_generichash.h>
 
 #include "proto/test.pb.h"
+#include "proto/proto_storage.pb.h"
 
 #include "base64.hpp"
 
+#include "sql_escaper.hpp"
+#include "table_lookup.hpp"
+#include "query_builder.hpp"
+
 using namespace amytest;
-
-namespace notstd {
-
-    namespace detail {
-        template<class Tuple, class F, std::size_t...Is>
-        void for_each(Tuple&& tuple, F&& f, std::index_sequence<Is...>)
-        {
-            using expand = int[];
-            void(expand{
-                0,
-                (f(std::get<Is>(std::forward<Tuple>(tuple))), 0)...
-            });
-        };
-
-    }
-
-    template<class Tuple, class F>
-    void for_each(Tuple&& tuple, F&& f)
-    {
-        using base_tuple = std::decay_t<Tuple>;
-        constexpr auto tuple_size = std::tuple_size<base_tuple>::value;
-        detail::for_each(std::forward<Tuple>(tuple),
-                         std::forward<F>(f),
-                         std::make_index_sequence<tuple_size>());
-    };
-}
-
-struct db_name
-    : std::string
-{
-    using std::string::string;
-};
-
-struct verbatim
-    : std::string
-{
-    using std::string::string;
-};
-
-struct sql_escaper
-{
-    sql_escaper(amy::connector& connector)
-        : connector(connector) {}
-
-
-    template<std::size_t N>
-    std::string const& operator ()(const char (& arg)[N])
-    {
-        auto slen = N - 1;
-        output_.resize(slen * 2 + 1 + 2);
-        output_[0] = '\'';
-
-        auto length = mysql_real_escape_string_quote(connector.native(),
-                                                     &output_[1],
-                                                     arg, slen,
-                                                     '\'');
-        output_[1 + length] = '\'';
-        output_.erase(length + 2);
-
-        return output_;
-    }
-
-    std::string const& operator ()(std::string const& arg)
-    {
-        auto slen = arg.length();
-        output_.resize(slen * 2 + 1 + 2);
-        output_[0] = '\'';
-
-        auto length = mysql_real_escape_string_quote(connector.native(),
-                                                     &output_[1],
-                                                     arg.data(), slen,
-                                                     '\'');
-        output_[1 + length] = '\'';
-        output_.erase(length + 2);
-
-        return output_;
-    }
-
-    std::string const& operator ()(db_name const& arg)
-    {
-        auto slen = arg.length();
-        output_.resize(slen * 2 + 1 + 2);
-        output_[0] = '`';
-
-        auto length = mysql_real_escape_string_quote(connector.native(),
-                                                     &output_[1],
-                                                     arg.data(), slen,
-                                                     '`');
-        output_[1 + length] = '`';
-        output_.erase(length + 2);
-
-        return output_;
-    }
-
-    std::string const& operator ()(verbatim const& arg)
-    {
-        return arg;
-    }
-
-    std::string const& operator ()(int x)
-    {
-        output_ = std::to_string(x);
-        return output_;
-    }
-
-    amy::connector& connector;
-    std::vector<char> buffer_;
-    std::string       output_;
-};
-
-template<class...Ts>
-auto format_query(amy::connector& connector, std::string const& format, Ts&& ...parts)
-{
-    auto escaper = sql_escaper(connector);
-    auto fmt     = boost::format(format);
-
-    std::string result;
-    notstd::for_each(std::forward_as_tuple(std::forward<Ts>(parts)...), [&escaper, &fmt](auto&& part)
-    {
-        fmt % escaper(std::forward<decltype(part)>(part));
-    });
-    return fmt;
-}
-
-template<class...Ts>
-auto build_query(amy::connector& connector, std::string const& format, Ts&& ...parts)
-{
-    return format_query(connector, format, std::forward<Ts>(parts)...).str();
-}
-
-std::string hex_encode(std::uint8_t * first, std::uint8_t* last)
-{
-    static const char digits[] = "0123456789ABCDEF";
-    std::string result;
-    auto dist = std::distance(first, last);
-    result.reserve(dist * 2);
-    while (first != last)
-    {
-        auto byte = *first++;
-        result.push_back(digits[byte >> 4]);
-        result.push_back(digits[byte & 0xf]);
-    }
-    return result;
-}
-
-
-struct table_lookup
-{
-    table_lookup(amy::connector& conn) : connection_(conn) {}
-
-    void init()
-    {
-        static const char query[] = ""
-                "CREATE TABLE IF NOT EXISTS tbl_table_name"
-                "("
-                "   real_name VARCHAR(1024) NOT NULL PRIMARY KEY,"
-                "   hash_name CHAR(64) NOT NULL,"
-                "   hash_algorithm VARCHAR(255) NOT NULL,"
-                "   UNIQUE INDEX (hash_name, hash_algorithm)"
-                ")";
-        execute(connection_, query);
-    }
-
-    std::string lookup(std::string const& real_name)
-    {
-        auto ifind = my_real_to_hash_.find(real_name);
-        if (ifind != my_real_to_hash_.end())
-            return ifind->second;
-
-        auto& our_cache = get_static_cache();
-        auto hash_name =  our_cache.lookup(connection_, real_name);
-        my_real_to_hash_[real_name] = hash_name;
-        my_hash_to_real_[hash_name] = real_name;
-        return hash_name;
-    }
-
-    struct cache
-    {
-        std::string lookup(amy::connector& conn, std::string const& real_name)
-        {
-            auto lock = std::unique_lock<std::mutex>(mutex_);
-            auto ifind = real_to_hash_.find(real_name);
-            if (ifind != real_to_hash_.end())
-                return ifind->second;
-            conn.query(build_query(conn, "select hash_name from tbl_table_name where real_name=%1%;", real_name));
-            auto rs = conn.store_result();
-            if (rs.size() == 0)
-            {
-                std::uint8_t hash[32];
-                crypto_generichash(hash, 32, reinterpret_cast<const unsigned char*>(real_name.c_str()), real_name.length(), nullptr, 0);
-                auto hash_name = hex_encode(hash, hash + 32);
-                update(real_name, hash_name);
-                execute(conn, build_query(conn,
-                        "insert into tbl_table_name (real_name, hash_name, hash_algorithm)"
-                " values (%1%, %2%, %3%)",
-                        real_name, hash_name, "crypto_generichash(32,no_key)"));
-                return hash_name;
-
-            } else {
-                auto hash_name = rs.at(0).at(0).as<std::string>();
-                update(real_name, hash_name);
-                return hash_name;
-            }
-        }
-
-
-        void update(std::string const& real_name, std::string const& hashed_name)
-        {
-            real_to_hash_[real_name] = db_name(hashed_name);
-            hash_to_real_[hashed_name] = real_name;
-        }
-
-        std::unordered_map<std::string, std::string> real_to_hash_;
-        std::unordered_map<std::string, std::string> hash_to_real_;
-        std::mutex mutex_;
-    };
-
-    static cache& get_static_cache() {
-        static cache cache_ {};
-        return cache_;
-    }
-
-    amy::connector& connection_;
-    std::unordered_map<std::string, std::string> my_real_to_hash_;
-    std::unordered_map<std::string, std::string> my_hash_to_real_;
-};
-
-
-
 
 struct perform_test
 {
@@ -422,6 +198,88 @@ std::string deduce_string_storage(std::int64_t max_length)
     }
 }
 
+struct member_history
+{
+    using Descriptor = google::protobuf::Descriptor;
+    using FieldDescriptor = google::protobuf::FieldDescriptor;
+
+    member_history(Descriptor const* descriptor)
+            : base(descriptor)
+    {}
+
+    template<class Iter>
+    member_history(Descriptor const* descriptor, Iter first, Iter last)
+            : base(descriptor)
+    , fields { first, last }
+    {}
+
+    member_history& operator+=(FieldDescriptor const* field) {
+        fields.push_back(field);
+        return *this;
+    }
+
+    std::string name() const {
+        std::string myResult = base->full_name();
+        for (auto field : fields)
+        {
+            myResult += ":" + std::to_string(field->number());
+        }
+        return myResult;
+    }
+
+    bool has_parent() const {
+        return not fields.empty();
+    };
+
+    member_history parent() const {
+        auto first = fields.begin();
+        auto last = fields.end();
+        if (last != first) --last;
+        return member_history(base, first, last);
+    }
+
+    google::protobuf::Descriptor const* base;
+    std::vector<::google::protobuf::FieldDescriptor const*> fields;
+};
+
+member_history operator + (member_history l, member_history::FieldDescriptor const* r) {
+    return l += r;
+}
+
+void build_repeated_scheme(query_doer& con,
+                           member_history history)
+{
+    auto this_table_name = history.name();
+}
+
+
+
+void create_message_table(query_doer& con, member_history const& history)
+{
+    query_builder builder(con.escaper);
+    builder.add_component("CREATE TABLE IF NOT EXISTS %s (\n", db_name(con.tbl_lookup.lookup(history.name())));
+    builder.add_component(" __id__ INT NOT NULL AUTO_INCREMENT PRIMARY KEY\n");
+    if (history.has_parent())
+    {
+        builder.add_component(",__parent__ INT NOT NULL\n");
+        builder.add_component(", CONSTRAINT FOREIGN KEY (__parent__)"
+        " REFERENCES %s (__id__)"
+        " ON DELETE CASCADE"
+        " ON UPDATE CASCADE", db_name(con.tbl_lookup.lookup(history.parent().name())));
+    }
+    builder.add_component(")");
+    std::cout << "formatting:\n" << builder.format_str << std::endl;
+    auto query = builder().str();
+    std::cout << "executing:\n" << query << std::endl;
+    execute(con.con, query);
+}
+
+void build_scheme(query_doer& con, member_history const& child)
+{
+    create_message_table(con, child);
+
+
+}
 
 void build_scheme(query_doer& con, google::protobuf::Descriptor const *descriptor)
 {
@@ -429,14 +287,9 @@ void build_scheme(query_doer& con, google::protobuf::Descriptor const *descripto
 
     auto table_hash_name = con.tbl_lookup.lookup(descriptor->full_name());
 
+    auto history = member_history(descriptor);
 
-
-    con(R"__(CREATE TABLE IF NOT EXISTS %1% (
-__id__ INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-__owner_type__ VARCHAR(64) NULL,
-__owner_id__ INT NULL
-);
-)__", db_name(table_hash_name));
+    create_message_table(con, history);
 
     auto                   nfields = descriptor->field_count();
 
@@ -446,7 +299,7 @@ __owner_id__ INT NULL
         std::cout << " type: " << field->type() << " - " << field->type_name();
         std::cout << std::endl;
         if (field->is_repeated()) {
-
+            build_repeated_scheme(con, history + field);
         }
         else {
             switch (field->type()) {
@@ -460,17 +313,17 @@ __owner_id__ INT NULL
                         storage_def += " NOT NULL DEFAULT " + con.enquote(field->default_value_string());
                     }
 
-                    con.add_missing_column(table_hash_name, field->name(), storage_def);
+                    con.add_missing_column(table_hash_name, std::to_string(field->number()), storage_def);
                 }
                     break;
 
                 case FieldDescriptor::TYPE_INT32: {
-                    con.add_missing_column(table_hash_name, field->name(), "INT(9) NULL");
+                    con.add_missing_column(table_hash_name, std::to_string(field->number()), "INT(9) NULL");
                 }
                     break;
 
                 case FieldDescriptor::TYPE_MESSAGE:
-                    build_scheme(con, field->message_type());
+                    build_scheme(con, history + field);
                     break;
                 default:
                     std::cout << "ignored\n";

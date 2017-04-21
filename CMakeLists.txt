@@ -30,7 +30,13 @@ include_directories(SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/amy/include")
 add_subdirectory(proto)
 
 
-set(SOURCE_FILES src/main.cpp src/config.hpp src/base64.cpp src/base64.hpp)
+set(SOURCE_FILES src/main.cpp src/config.hpp
+        src/base64.cpp src/base64.hpp
+        src/hasher.cpp src/hasher.hpp
+        src/notstd.hpp
+        src/table_lookup.cpp src/table_lookup.hpp
+        src/sql_escaper.cpp src/sql_escaper.hpp
+        src/query_builder.cpp src/query_builder.hpp)
 
 add_executable(amy-test ${SOURCE_FILES})
 target_link_libraries(amy-test proto libsodium::libsodium ${MYSQL-CLIENT_LIBRARY} ${Boost_LIBRARIES} ${Protobuf_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})

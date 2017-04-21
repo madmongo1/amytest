@@ -1,4 +1,4 @@
-set(PROTOS limits.proto test.proto)
+set(PROTOS limits.proto proto_storage.proto test.proto)
 
 protobuf_generate_cpp(PROTO_SRC PROTO_HDR ${PROTOS})
 

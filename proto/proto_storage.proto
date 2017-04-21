@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package proto.storage;
+
+message HashAlgorithm {
+    message CryptoGenericHash {
+        uint32 hashLength = 1;
+        bytes key = 2;
+    }
+
+    oneof whichAlgorithm {
+        CryptoGenericHash cryptoGenericHash = 1;
+    }
+}
